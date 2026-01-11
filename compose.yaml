@@ -1,0 +1,139 @@
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.3.5
+    restart: on-failure
+    environment:
+      CLICKHOUSE_USER: uptrace
+      CLICKHOUSE_PASSWORD: uptrace
+      CLICKHOUSE_DB: uptrace
+    healthcheck:
+      test: [ 'CMD', 'wget', '--spider', '-q', 'localhost:8123/ping' ]
+      interval: 1s
+      timeout: 1s
+      retries: 30
+    volumes:
+      - ch_data:/var/lib/clickhouse
+    ports:
+      - '8123:8123'
+      - '9000:9000'
+    networks:
+      - uptrace
+
+  postgres:
+    image: postgres:17-alpine
+    restart: on-failure
+    environment:
+      PGDATA: /var/lib/postgresql/data/pgdata
+      POSTGRES_USER: uptrace
+      POSTGRES_PASSWORD: uptrace
+      POSTGRES_DB: uptrace
+    healthcheck:
+      test: [ 'CMD-SHELL', 'pg_isready -U uptrace -d uptrace' ]
+      interval: 1s
+      timeout: 1s
+      retries: 30
+    volumes:
+      - 'pg_data3:/var/lib/postgresql/data/pgdata'
+    ports:
+      - '5432:5432'
+    networks:
+      - uptrace
+
+  redis:
+    image: redis:6.2.2-alpine
+    restart: on-failure
+    networks:
+      - uptrace
+    labels:
+      - 'hm-apollo-gateway.url=http://redis/graphql'
+    deploy:
+      mode: replicated
+      replicas: 2
+
+  uptrace:
+    image: 'uptrace/uptrace:2.0.1'
+    restart: on-failure
+    volumes:
+      - ./uptrace.yaml:/etc/uptrace/config.yml
+    ports:
+      - '14317:4317'
+      - '14318:80'
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.uptrace.rule=Host(`uptrace.docker`)"
+      - "traefik.http.routers.uptrace.entryPoints=web"
+      - "traefik.http.routers.uptrace.service=uptrace"
+      - "traefik.http.services.uptrace.loadbalancer.server.port=80"
+    depends_on:
+      - clickhouse
+      - postgres
+    networks:
+      - uptrace
+      - traefik
+
+  otelcol:
+    image: otel/opentelemetry-collector-contrib:0.123.0
+    restart: on-failure
+    volumes:
+      - ./otel-collector.yaml:/etc/otelcol-contrib/config.yaml
+    ports:
+      - '4317:4317'
+      - '4318:4318'
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+    depends_on:
+      - uptrace
+    networks:
+      - uptrace
+      - default
+
+  mailpit:
+    image: axllent/mailpit
+    restart: always
+    ports:
+      - 1025:1025
+      - 8025:8025
+    environment:
+      MP_MAX_MESSAGES: 5000
+      MP_DATA_FILE: /data/mailpit.db
+      MP_SMTP_AUTH_ACCEPT_ANY: 1
+      MP_SMTP_AUTH_ALLOW_INSECURE: 1
+    volumes:
+      - mailpit_data:/data
+    networks:
+      - uptrace
+
+  rabbitmq:
+    image: rabbitmq:management
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: admin
+      RABBITMQ_DEFAULT_PASS: admin
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.rabbitmq.rule=Host(`rabbitmq.docker`)"
+      - "traefik.http.routers.rabbitmq.entryPoints=web"
+      - "traefik.http.routers.rabbitmq.service=rabbitmq"
+      - "traefik.http.services.rabbitmq.loadbalancer.server.port=15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+      - rabbitmq_log:/var/log/rabbitmq
+    networks:
+      - default
+      - traefik
+
+
+volumes:
+  ch_data:
+  pg_data3:
+  mailpit_data:
+  rabbitmq_data:
+  rabbitmq_log:
+
+networks:
+  traefik:
+    external: true
+  uptrace:
+  default:
